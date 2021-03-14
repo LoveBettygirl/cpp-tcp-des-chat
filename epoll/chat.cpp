@@ -1,8 +1,13 @@
+#include "server.h"
+#include "client.h"
 #include <iostream>
 #include <cstring>
 #include <regex>
 #include <getopt.h>
+#include <signal.h>
 using namespace std;
+
+bool running = true;
 
 void showVersion()
 {
@@ -19,6 +24,11 @@ void showUsage()
     cout << " -v, --version              Print the version number and exit." << endl;
     cout << " -h, --help                 Print this message and exit." << endl;
     exit(1);
+}
+
+void stop(int signo)
+{
+    running = false;
 }
 
 int main(int argc, char **argv)
@@ -67,7 +77,8 @@ int main(int argc, char **argv)
 
         case 'a':
             ip = string(optarg);
-            if (!regex_match(ip, r)) {
+            if (!regex_match(ip, r))
+            {
                 cerr << "Invaild IP address format." << endl;
                 exit(-1);
             }
@@ -75,7 +86,8 @@ int main(int argc, char **argv)
 
         case 'p':
             port = atoi(optarg);
-            if (port < 0 || port > 65535) {
+            if (port < 0 || port > 65535)
+            {
                 cerr << "The port " << port << " out of range." << endl;
                 exit(-1);
             }
@@ -98,12 +110,20 @@ int main(int argc, char **argv)
     if (optind < argc)
         showUsage();
 
-    if (client) {
+    signal(SIGINT, stop); // 注册ctrl+c退出处理函数
 
+    if (client)
+    {
+        Client client(ip, port);
+        client.start();
+        client.doEpoll();
     }
-    else {
-
+    else
+    {
+        Server server(ip, port);
+        server.start();
+        server.doEpoll();
     }
 
-    exit(EXIT_SUCCESS);
+    return 0;
 }
