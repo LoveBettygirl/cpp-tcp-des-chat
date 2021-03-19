@@ -1,11 +1,11 @@
 #include "server.h"
 
-Server::Server() : ip("0.0.0.0"), port(2000), started(false), clientId(0), socketfd(0), epollfd(0), rsa(256)
+Server::Server() : ip("0.0.0.0"), port(2000), started(false), clientId(0), socketfd(0), epollfd(0), rsa(256), childpid(0)
 {
     init();
 }
 
-Server::Server(string ip, int port) : ip(ip), port(port), started(false), clientId(0), socketfd(0), epollfd(0), rsa(256)
+Server::Server(string ip, int port) : ip(ip), port(port), started(false), clientId(0), socketfd(0), epollfd(0), rsa(256), childpid(0)
 {
     init();
 }
@@ -18,9 +18,10 @@ Server::~Server()
 void Server::init()
 {
     memset(&servaddr, 0, sizeof(servaddr));
+    memset(pipefd, 0, sizeof(pipefd));
     RSAPublicKey publicKey = rsa.getPublicKey();
-    e = bigInteger2String(publicKey.getE());
-    n = bigInteger2String(publicKey.getN());
+    e = toBinaryString(publicKey.getE());
+    n = toBinaryString(publicKey.getN());
 }
 
 void Server::clean()
@@ -41,6 +42,8 @@ void Server::clean()
     close(pipefd[0]);
     close(epollfd);
     close(socketfd);
+    close(0);
+    kill(childpid, SIGKILL);
 }
 
 void Server::setIPAddress(string ip)
@@ -67,7 +70,7 @@ void Server::setPort(int port)
 
 void Server::start(bool isBlock)
 {
-    if ((socketfd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    if ((socketfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
         memset(errmsg, 0, sizeof(errmsg));
         snprintf(errmsg, sizeof(errmsg), "create socket error: %s (errno: %d)\n", strerror(errno), errno);
@@ -86,7 +89,7 @@ void Server::start(bool isBlock)
 
     // 设置重用地址，防止Address already in use
     int on = 1;
-    if (setsockopt(socketfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1)
+    if (setsockopt(socketfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
     {
         memset(errmsg, 0, sizeof(errmsg));
         snprintf(errmsg, sizeof(errmsg), "set reuse addr error: %s (errno: %d)\n", strerror(errno), errno);
@@ -96,7 +99,7 @@ void Server::start(bool isBlock)
     }
 
     // 将本地地址绑定到所创建的套接字上
-    if (bind(socketfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) == -1)
+    if (bind(socketfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0)
     {
         memset(errmsg, 0, sizeof(errmsg));
         snprintf(errmsg, sizeof(errmsg), "bind socket error: %s (errno: %d)\n", strerror(errno), errno);
@@ -106,7 +109,7 @@ void Server::start(bool isBlock)
     }
 
     // 开始监听是否有客户端连接
-    if (listen(socketfd, BACKLOG) == -1)
+    if (listen(socketfd, BACKLOG) < 0)
     {
         memset(errmsg, 0, sizeof(errmsg));
         snprintf(errmsg, sizeof(errmsg), "listen socket error: %s (errno: %d)\n", strerror(errno), errno);
@@ -117,12 +120,6 @@ void Server::start(bool isBlock)
 
     started = true;
     cout << "Listening on <" << ip << ":" << port << ">..." << endl;
-    return true;
-}
-
-int Server::getSocketfd()
-{
-    return socketfd;
 }
 
 void Server::doEpoll()
@@ -137,7 +134,7 @@ void Server::doEpoll()
         exit(CREATE_PIPE_ERROR);
     }
 
-    extern bool running;
+    extern volatile bool running;
 
     pid_t pid = fork();
     if (pid == 0)
@@ -152,12 +149,15 @@ void Server::doEpoll()
             string input;
             int id;
             cin >> input;
+            if (!running)
+                break;
             cout << "Input the client id will send to: ";
             cin >> id;
+            if (!running)
+                break;
             sprintf(message, "%d %s", id, input.c_str());
-            printf("msg write to pipe: %s\n", message);
 
-            if (write(pipefd[1], message, strlen(message)) < 0)
+            if (write(pipefd[1], message, strlen(message) + 1) < 0)
             {
                 memset(errmsg, 0, sizeof(errmsg));
                 snprintf(errmsg, sizeof(errmsg), "fork error: %s (errno: %d)\n", strerror(errno), errno);
@@ -166,9 +166,11 @@ void Server::doEpoll()
             }
         }
         close(pipefd[1]);
+        exit(SUCCESS); // 不让子进程调用析构函数
     }
     else
     {
+        childpid = pid;
         close(pipefd[1]); // 关闭父进程管道写端
         if (!isBlock)
         {
@@ -180,12 +182,12 @@ void Server::doEpoll()
         char buf[MAX_BUFFER_SIZE] = {0};
         int buflen = 0;
         // 创建一个描述符
-        if ((epollfd = epoll_create(FDSIZE)) == -1)
+        if ((epollfd = epoll_create(FDSIZE)) < 0)
         {
             memset(errmsg, 0, sizeof(errmsg));
             snprintf(errmsg, sizeof(errmsg), "epoll create error: %s (errno: %d)\n", strerror(errno), errno);
             cerr << errmsg;
-            close(socketfd);
+            clean();
             exit(EPOLL_CREATE_ERROR);
         }
         // 添加监听描述符事件
@@ -198,14 +200,14 @@ void Server::doEpoll()
             handleEvents(events, ret, buf, buflen);
         }
         // 等待子进程退出
-        int wpid = waitpid(pid, nullptr, 0);
+        int wpid = waitpid(childpid, nullptr, 0);
     }
 }
 
 void Server::addEvent(int fd, int state)
 {
     struct epoll_event ev;
-    ev.events = state | EPOLLET;
+    ev.events = state | EPOLLET; // 设置边缘触发（ET）
     ev.data.fd = fd;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
 }
@@ -252,7 +254,7 @@ bool Server::handleAccept()
     struct sockaddr_in cliaddr;
     socklen_t cliaddrlen = sizeof(cliaddr);
     clifd = accept(socketfd, (struct sockaddr *)&cliaddr, &cliaddrlen);
-    if (clifd == -1)
+    if (clifd < 0)
     {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
             return false;
@@ -332,6 +334,10 @@ bool Server::doRead(int fd, char *buf, int &buflen)
                     break;
             }
             int targetid = atoi(s.c_str());
+            if (!clientList.size()) {
+                cerr << "There's no client." << endl;
+                return true;
+            }
             ClientInfo *currClient = findClientById(targetid);
             if (!currClient)
             {
@@ -346,6 +352,7 @@ bool Server::doRead(int fd, char *buf, int &buflen)
                 memset(currClient->writeBuf, 0, sizeof(currClient->writeBuf));
                 strcpy(currClient->plainBuf, &buf[i + 2]);
                 strcpy(currClient->writeBuf, res.c_str());
+                // 将fd对应的事件由读转为写，准备发送消息
                 modEvent(currClient->fd, EPOLLOUT);
             }
             else
@@ -389,30 +396,26 @@ bool Server::doWrite(int fd, char *buf, int buflen)
     char msg[MAX_BUFFER_SIZE] = {0};
     if (currClient && currClient->state == SERVER_PREPARED)
     {
-        nwrite = write(fd, currClient->writeBuf, strlen(currClient->writeBuf));
+        nwrite = write(fd, currClient->writeBuf, strlen(currClient->writeBuf) + 1);
         if (nwrite < 0)
         {
             memset(errmsg, 0, sizeof(errmsg));
             snprintf(errmsg, sizeof(errmsg), "RSA public key send error: %s (errno: %d)\n", strerror(errno), errno);
             cerr << errmsg;
-            close(fd);
-            delEvent(fd, EPOLLOUT);
             clean();
             exit(RSA_PUBKEY_SENT_ERROR);
         }
         currClient->state = RSA_PUBKEY_SENT;
-        modEvent(fd, EPOLLIN);
+        modEvent(fd, EPOLLIN); // 将fd对应的事件由写转为读，准备接收消息
     }
     else if (currClient && currClient->state == DES_KEY_RCVD)
     {
-        nwrite = write(fd, currClient->writeBuf, strlen(currClient->writeBuf));
+        nwrite = write(fd, currClient->writeBuf, strlen(currClient->writeBuf) + 1);
         if (nwrite < 0)
         {
             memset(errmsg, 0, sizeof(errmsg));
             snprintf(errmsg, sizeof(errmsg), "message send error: %s (errno: %d)\n", strerror(errno), errno);
             cerr << errmsg;
-            close(fd);
-            delEvent(fd, EPOLLOUT);
             clean();
             exit(MESSAGE_SENT_ERROR);
         }

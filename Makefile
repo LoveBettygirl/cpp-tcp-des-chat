@@ -29,6 +29,7 @@ $(OBJ_DIR)/%.o: ./%.cpp
 # Some convinient rules
 
 .PHONY: epoll run clean
+
 epoll: $(EPOLL_BINARY)
 
 # Link

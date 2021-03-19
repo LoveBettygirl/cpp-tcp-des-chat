@@ -80,7 +80,6 @@ string bigInteger2String(uint1024_t integer)
         temp >>= 1;
         bitLen++;
     }
-    cout << bitLen << endl;
     bitLen = bitLen % 8 == 0 ? bitLen : (bitLen / 8 + 1) * 8;
     string binary = toBinaryString(integer), zero;
     // 如果二进制位长度小于bitLen则在前面补0，否则取最后的bitLen位

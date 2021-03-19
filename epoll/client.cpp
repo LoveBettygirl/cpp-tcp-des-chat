@@ -1,7 +1,7 @@
 #include "client.h"
 
 Client::Client(string ip, int port) : remoteIP(ip), remotePort(port), state(CLIENT_PREPARED),
-                                      started(false), epollfd(0), socketfd(0), des(nullptr)
+                                      started(false), epollfd(0), socketfd(0), des(nullptr), childpid(0)
 {
     init();
 }
@@ -17,6 +17,7 @@ void Client::init()
     memset(&localaddr, 0, sizeof(localaddr));
     memset(plainBuf, 0, sizeof(plainBuf));
     memset(writeBuf, 0, sizeof(writeBuf));
+    memset(pipefd, 0, sizeof(pipefd));
     srand((unsigned)time(nullptr));
 }
 
@@ -30,6 +31,8 @@ void Client::clean()
     close(pipefd[1]);
     close(epollfd);
     close(socketfd);
+    close(0);
+    kill(childpid, SIGKILL);
 }
 
 void Client::setIPAddress(string ip)
@@ -76,11 +79,6 @@ void Client::start(bool isBlock)
     inet_pton(AF_INET, remoteIP.c_str(), &servaddr.sin_addr);
     servaddr.sin_port = htons(remotePort);
     this->isBlock = isBlock;
-    if (!isBlock)
-    {
-        int flags = fcntl(socketfd, F_GETFL, 0);
-        fcntl(socketfd, F_SETFL, flags | O_NONBLOCK); // 设置为非阻塞
-    }
 
     // 开始发起连接
     cout << "Connecting to <" << remoteIP << ":" << remotePort << ">..." << endl;
@@ -91,6 +89,13 @@ void Client::start(bool isBlock)
         cerr << errmsg;
         close(socketfd);
         exit(CONNECT_ERROR);
+    }
+
+    // 设置非阻塞一定要在connect之后，解决Operation now in progress错误
+    if (!isBlock)
+    {
+        int flags = fcntl(socketfd, F_GETFL, 0);
+        fcntl(socketfd, F_SETFL, flags | O_NONBLOCK); // 设置为非阻塞
     }
 
     // 获取本地socket信息
@@ -113,11 +118,6 @@ void Client::start(bool isBlock)
     cout << "Begin to chat..." << endl;
 }
 
-int Client::getSocketfd()
-{
-    return socketfd;
-}
-
 void Client::doEpoll()
 {
     // 创建用于父子进程通信的管道，子进程监控用户输入
@@ -130,12 +130,12 @@ void Client::doEpoll()
         exit(CREATE_PIPE_ERROR);
     }
 
-    extern bool running;
+    extern volatile bool running;
 
     pid_t pid = fork();
     if (pid == 0)
     {
-        close(pipefd[0]); // 关闭父进程管道读端
+        close(pipefd[0]); // 关闭子进程管道读端
         char message[MAX_BUFFER_SIZE] = {0};
 
         while (running)
@@ -144,10 +144,11 @@ void Client::doEpoll()
             // fgets(message, MAX_BUFFER_SIZE, stdin);
             string input;
             cin >> input;
+            if (!running)
+                break;
             strcpy(message, input.c_str());
-            printf("msg write to pipe: %s\n", message);
 
-            if (write(pipefd[1], message, strlen(message)) < 0)
+            if (write(pipefd[1], message, strlen(message) + 1) < 0)
             {
                 memset(errmsg, 0, sizeof(errmsg));
                 snprintf(errmsg, sizeof(errmsg), "fork error: %s (errno: %d)\n", strerror(errno), errno);
@@ -156,9 +157,11 @@ void Client::doEpoll()
             }
         }
         close(pipefd[1]);
+        exit(SUCCESS); // 不让子进程调用析构函数
     }
     else
     {
+        childpid = pid;
         close(pipefd[1]); // 关闭父进程管道写端
         if (!isBlock)
         {
@@ -170,12 +173,12 @@ void Client::doEpoll()
         char buf[MAX_BUFFER_SIZE] = {0};
         int buflen = 0;
         // 创建一个描述符
-        if ((epollfd = epoll_create(FDSIZE)) == -1)
+        if ((epollfd = epoll_create(FDSIZE)) < 0)
         {
             memset(errmsg, 0, sizeof(errmsg));
             snprintf(errmsg, sizeof(errmsg), "epoll create error: %s (errno: %d)\n", strerror(errno), errno);
             cerr << errmsg;
-            close(socketfd);
+            clean();
             exit(EPOLL_CREATE_ERROR);
         }
         // 添加监听描述符事件
@@ -188,14 +191,14 @@ void Client::doEpoll()
             handleEvents(events, ret, buf, buflen);
         }
         // 等待子进程退出
-        int wpid = waitpid(pid, nullptr, 0);
+        int wpid = waitpid(childpid, nullptr, 0);
     }
 }
 
 void Client::addEvent(int fd, int state)
 {
     struct epoll_event ev;
-    ev.events = state | EPOLLET;
+    ev.events = state | EPOLLET; // 设置边缘触发（ET）
     ev.data.fd = fd;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
 }
@@ -249,10 +252,12 @@ bool Client::doRead(int fd, char *buf, int &buflen)
     }
     else if (buflen == 0)
     {
-        // 准备重新连接
+        // 准备重新连接，每隔1s尝试一次
         char msg[MAX_BUFFER_SIZE] = {0};
+        extern volatile bool running;
         if (fd == socketfd)
         {
+            state = CLIENT_PREPARED;
             sprintf(msg, "Connect failed!\nReconnecting to <%s:%d>...\n", remoteIP.c_str(), remotePort);
             cerr << msg;
             int newfd;
@@ -269,22 +274,32 @@ bool Client::doRead(int fd, char *buf, int &buflen)
                 int flags = fcntl(newfd, F_GETFL, 0);
                 fcntl(newfd, F_SETFL, flags | O_NONBLOCK); // 设置为非阻塞
             }
-            if (bind(newfd, (struct sockaddr *)&localaddr, sizeof(localaddr)) < 0)
-            {
-                memset(errmsg, 0, sizeof(errmsg));
-                snprintf(errmsg, sizeof(errmsg), "bind socket error: %s (errno: %d)\n", strerror(errno), errno);
-                cerr << errmsg;
-                clean();
-                exit(BIND_SOCKET_ERROR);
-            }
-            while (connect(newfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0)
+            while (connect(newfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0 && running)
             {
                 sleep(1);
             }
+            if (!running) {
+                clean();
+                exit(CLIENT_NOT_CONNECT_ERROR);
+            }
             socketfd = newfd;
             addEvent(socketfd, EPOLLIN);
-            state = CLIENT_PREPARED;
-            cout << "Connect Success!" << endl;
+            memset(&localaddr, 0, sizeof(localaddr));
+            socklen_t localaddrlen = sizeof(localaddr);
+            if (getsockname(newfd, (struct sockaddr *)&localaddr, &localaddrlen) < 0)
+            {
+                memset(errmsg, 0, sizeof(errmsg));
+                snprintf(errmsg, sizeof(errmsg), "get socket name failed: %s (errno: %d)\n", strerror(errno), errno);
+                cerr << errmsg;
+                close(newfd);
+                clean();
+                exit(GET_LOCAL_ADDRESS_ERROR);
+            }
+            char *ipstr = inet_ntoa(localaddr.sin_addr);
+            localPort = ntohs(localaddr.sin_port);
+            localIP = string(ipstr);
+            cout << "Connect Success!";
+            cout << " You get IP " << localIP << " and port " << localPort << endl;
             cout << "Begin to chat..." << endl;
         }
         close(fd);
@@ -317,12 +332,15 @@ bool Client::doRead(int fd, char *buf, int &buflen)
             string s(buf);
             int findDelim = s.find(' ');
             string e = s.substr(0, findDelim), n = s.substr(findDelim + 1);
-            RSAPublicKey publicKey(string2BigInteger(e), string2BigInteger(n));
-            genRandomDESKey();
+            RSAPublicKey publicKey(parseBinaryBigInt(e), parseBinaryBigInt(n));
+            if (!des) {
+                genRandomDESKey();
+                des = new DES(desKey);
+            }
             string cipher = RSA::encry(desKey, publicKey);
-            des = new DES(desKey);
             memset(writeBuf, 0, sizeof(writeBuf));
             strcpy(writeBuf, cipher.c_str());
+            // 将fd对应的事件由读转为写，准备发送消息
             modEvent(fd, EPOLLOUT);
         }
         else if (state == RSA_PUBKEY_RCVD)
@@ -342,31 +360,27 @@ bool Client::doWrite(int fd, char *buf, int buflen)
     char msg[MAX_BUFFER_SIZE] = {0};
     if (fd == socketfd && state == RSA_PUBKEY_RCVD)
     {
-        nwrite = write(fd, writeBuf, strlen(writeBuf));
+        nwrite = write(fd, writeBuf, strlen(writeBuf) + 1);
         if (nwrite < 0)
         {
             memset(errmsg, 0, sizeof(errmsg));
             snprintf(errmsg, sizeof(errmsg), "message send error: %s (errno: %d)\n", strerror(errno), errno);
             cerr << errmsg;
-            close(fd);
-            delEvent(fd, EPOLLOUT);
             clean();
             exit(MESSAGE_SENT_ERROR);
         }
         sprintf(msg, "Send to <%s:%d>: %s\n", remoteIP.c_str(), remotePort, plainBuf);
         cout << msg;
-        modEvent(fd, EPOLLIN);
+        modEvent(fd, EPOLLIN); // 将fd对应的事件由写转为读，准备接收消息
     }
     else if (fd == socketfd && state == CLIENT_PREPARED)
     {
-        nwrite = write(fd, writeBuf, strlen(writeBuf));
+        nwrite = write(fd, writeBuf, strlen(writeBuf) + 1);
         if (nwrite < 0)
         {
             memset(errmsg, 0, sizeof(errmsg));
             snprintf(errmsg, sizeof(errmsg), "DES key send error: %s (errno: %d)\n", strerror(errno), errno);
             cerr << errmsg;
-            close(fd);
-            delEvent(fd, EPOLLOUT);
             clean();
             exit(DES_KEY_SENT_ERROR);
         }

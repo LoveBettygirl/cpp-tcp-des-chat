@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -41,8 +42,9 @@ private:
     char writeBuf[MAX_BUFFER_SIZE]; // 需要往socket发送的数据（RSA/DES密文）
     int pipefd[2];
     bool started;
-    int state;
-    bool isBlock;
+    int state; // 表示客户端所处的状态，根据状态决定要进行的操作
+    bool isBlock; // 是否阻塞
+    pid_t childpid;
     string desKey;
     DES *des;
 
@@ -53,7 +55,6 @@ private:
 
 public:
     void start(bool isblock = false);
-    int getSocketfd();
     void doEpoll();
     void addEvent(int fd, int state);
     void delEvent(int fd, int state);

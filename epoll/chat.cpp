@@ -1,18 +1,17 @@
 #include "server.h"
 #include "client.h"
-#include <iostream>
-#include <cstring>
+#include "macro.h"
 #include <regex>
 #include <getopt.h>
 #include <signal.h>
 using namespace std;
 
-bool running = true;
+volatile bool running = true;
 
 void showVersion()
 {
     cout << "v1.0.0" << endl;
-    exit(0);
+    exit(SUCCESS);
 }
 
 void showUsage()
@@ -23,12 +22,13 @@ void showUsage()
     cout << " -p, --port=PORT            The port of the server." << endl;
     cout << " -v, --version              Print the version number and exit." << endl;
     cout << " -h, --help                 Print this message and exit." << endl;
-    exit(1);
+    exit(INVALID_OPTION);
 }
 
 void stop(int signo)
 {
     running = false;
+    close(0); // close stdin
 }
 
 int main(int argc, char **argv)
@@ -71,7 +71,7 @@ int main(int argc, char **argv)
             else
             {
                 cerr << "The option value must be \"s\" or \"c\"." << endl;
-                exit(-1);
+                exit(INVALID_OPTION);
             }
             break;
 
@@ -80,7 +80,7 @@ int main(int argc, char **argv)
             if (!regex_match(ip, r))
             {
                 cerr << "Invaild IP address format." << endl;
-                exit(-1);
+                exit(INVALID_OPTION);
             }
             break;
 
@@ -89,7 +89,7 @@ int main(int argc, char **argv)
             if (port < 0 || port > 65535)
             {
                 cerr << "The port " << port << " out of range." << endl;
-                exit(-1);
+                exit(INVALID_OPTION);
             }
             break;
 
@@ -110,7 +110,7 @@ int main(int argc, char **argv)
     if (optind < argc)
         showUsage();
 
-    signal(SIGINT, stop); // 注册ctrl+c退出处理函数
+    signal(SIGINT, stop); // Register ctrl+c handler
 
     if (client)
     {
@@ -125,5 +125,5 @@ int main(int argc, char **argv)
         server.doEpoll();
     }
 
-    return 0;
+    return SUCCESS;
 }

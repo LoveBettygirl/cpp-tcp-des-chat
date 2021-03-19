@@ -28,9 +28,9 @@ struct ClientInfo
     int port;
     int id;
     int fd;
-    int state;
-    char plainBuf[MAX_BUFFER_SIZE];
-    char writeBuf[MAX_BUFFER_SIZE];
+    int state; // 表示客户端所处的状态，根据状态决定要进行的操作
+    char plainBuf[MAX_BUFFER_SIZE]; // 需要发送的消息原文
+    char writeBuf[MAX_BUFFER_SIZE]; // 需要往socket发送的数据（RSA/DES密文）
     string desKey;
     DES *des;
     ClientInfo(string ip, int port, int fd, int id) : ip(ip), port(port), fd(fd), id(id),
@@ -59,11 +59,12 @@ private:
     struct sockaddr_in servaddr;
     int epollfd;
     char errmsg[256];
-    unordered_map<int, ClientInfo *> clientList;
+    unordered_map<int, ClientInfo *> clientList; // 服务端维护的连接客户端列表
     int clientId;
     int pipefd[2];
     bool started;
-    bool isBlock;
+    bool isBlock; // 是否阻塞
+    pid_t childpid;
     string e;
     string n;
     RSA rsa;
@@ -75,7 +76,6 @@ private:
 
 public:
     void start(bool isBlock = false);
-    int getSocketfd();
     void doEpoll();
     void addEvent(int fd, int state);
     void delEvent(int fd, int state);
