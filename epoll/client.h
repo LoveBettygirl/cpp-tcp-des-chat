@@ -19,10 +19,11 @@
 #include "../cipher/RSA.h"
 #include "../cipher/DES.h"
 #include "../cipher/utils.h"
-#include "macro.h"
+#include "epoll.h"
+#include "../macro.h"
 using namespace std;
 
-class Client
+class Client : public Epoll
 {
 public:
     Client(string ip, int port);
@@ -50,21 +51,20 @@ private:
 
 private:
     void genRandomDESKey();
-    void init();
-    void clean();
+    void init() override;
+    void clean() override;
 
 public:
-    void start(bool isblock = false);
-    void doEpoll();
-    void addEvent(int fd, int state);
-    void delEvent(int fd, int state);
-    void modEvent(int fd, int state);
-    void handleEvents(struct epoll_event *events, int num, char *buf, int &buflen);
-    bool handleAccept();
-    bool doRead(int fd, char *buf, int &buflen);
-    bool doWrite(int fd, char *buf, int buflen);
-    void setIPAddress(string ip);
-    void setPort(int port);
+    void start(bool isblock = false) override;
+    void doEpoll() override;
+    void addEvent(int fd, int state) override;
+    void delEvent(int fd, int state) override;
+    void modEvent(int fd, int state) override;
+    void handleEvents(struct epoll_event *events, int num, char *buf, int &buflen) override;
+    bool doRead(int fd, char *buf, int &buflen) override;
+    bool doWrite(int fd, char *buf, int buflen) override;
+    void setIPAddress(string ip) override;
+    void setPort(int port) override;
 };
 
 #endif

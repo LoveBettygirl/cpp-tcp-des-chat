@@ -1,6 +1,5 @@
 #include "server.h"
 #include "client.h"
-#include "macro.h"
 #include <regex>
 #include <getopt.h>
 #include <signal.h>
